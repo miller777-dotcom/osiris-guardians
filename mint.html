@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Osiris Guardians — Mint</title>
+<script src="https://cdn.jsdelivr.net/npm/ethers@6.13.2/dist/ethers.umd.min.js"></script>
+<style>
+  body { background:#0a2b1a; color:#fff; font-family: Arial, sans-serif; text-align:center; margin:0; padding:24px; }
+  h1 { margin:8px 0 4px; }
+  p.sub { color:#9fd8b4; margin-top:0; }
+  .card { background:#123a26; border:1px solid #2a7a4f; border-radius:16px; max-width:520px; margin:20px auto; padding:24px; }
+  button { background:#f5b301; color:#111; border:none; border-radius:10px; padding:12px 20px; font-size:16px; font-weight:bold; cursor:pointer; margin:6px; }
+  button:disabled { background:#555; color:#ccc; cursor:not-allowed; }
+  button.secondary { background:#2a7a4f; color:#fff; }
+  input, select { padding:10px; border-radius:8px; border:1px solid #2a7a4f; background:#0a2b1a; color:#fff; font-size:15px; }
+  #status { min-height:22px; color:#ffd75e; margin-top:12px; }
+  #ownerPanel { display:none; border-top:1px solid #2a7a4f; margin-top:20px; padding-top:16px; }
+  .row { margin:12px 0; }
+  a { color:#7fd8a4; }
+</style>
+</head>
+<body>
+<h1>👑 Osiris Guardians</h1>
+<p class="sub">4,444 NFTs on BNB Smart Chain — 2,222 FREE for Agent ID holders + 2,222 at 0.25 USDT</p>
+<p class="sub">Part 2 of <b>Guardians of the Afterlife</b> — Part 1: <a href="https://miller777-dotcom.github.io/anubis-agents/mint.html">Anubis Agents</a><br>
+Token airdrop planned for Paid Genesis holders — wallets holding BOTH Anubis Agents and Osiris Guardians get an extra bonus share.</p>
+
+<div class="card">
+  <div id="deployBanner" style="display:none; background:#5a1a1a; border-radius:10px; padding:12px; margin-bottom:12px;">
+    Mint opens after deployment — the contract address is not set yet.
+  </div>
+  <button id="connectBtn">Connect Wallet</button>
+  <div class="row" id="walletInfo"></div>
+  <div class="row" id="stats">Connect a wallet to see live supply.</div>
+
+  <div class="row">
+    <button id="freeBtn" disabled>Free Mint (Agent ID)</button>
+  </div>
+  <div class="row">
+    <label>Paid mint quantity (0.25 USDT each, max 10): </label>
+    <select id="qty">
+      <option>1</option><option>2</option><option>3</option><option>4</option><option>5</option>
+      <option>6</option><option>7</option><option>8</option><option>9</option><option>10</option>
+    </select>
+  </div>
+  <div class="row">
+    <button id="approveBtn" disabled>1. Approve USDT</button>
+    <button id="paidBtn" disabled>2. Paid Mint</button>
+  </div>
+  <div id="status"></div>
+
+  <div id="ownerPanel">
+    <h3>Owner panel</h3>
+    <div class="row">
+      <button id="openBtn" class="secondary">Open Mint</button>
+      <button id="closeBtn" class="secondary">Close Mint</button>
+    </div>
+    <div class="row">
+      <input id="baseUriInput" placeholder="Base URI, e.g. https://.../metadata/" size="34">
+      <button id="baseUriBtn" class="secondary">Set Base URI</button>
+    </div>
+    <div class="row">
+      <button id="withdrawBtn" class="secondary">Withdraw USDT proceeds</button>
+    </div>
+  </div>
+</div>
+<p class="sub">Free mint: 1 per wallet, Binance Agent ID holders only. Paid mint: 0.25 USDT each, max 10 per wallet.<br>
+Never share your seed phrase with anyone. This page only asks your wallet to sign its own transactions.</p>
+
+<script>
+  // Osiris Guardians — DEPLOYED 2026-11-03. Contract verified on-chain.
+  const CONTRACT_ADDRESS = "0xd6fcf9db58a559aafbbf9fd823f4f081e6701311";
+  const USDT = "0x55d398326f99059fF775485246999027B3197955";
+  const BSC_CHAIN_ID = "0x38";
+  const ABI = [
+    "function freeMint()",
+    "function paidMint(uint256 qty)",
+    "function freeMinted() view returns (uint256)",
+    "function paidMinted() view returns (uint256)",
+    "function mintOpen() view returns (bool)",
+    "function hasFreeMinted(address) view returns (bool)",
+    "function paidMintedBy(address) view returns (uint256)",
+    "function owner() view returns (address)",
+    "function setMintOpen(bool)",
+    "function setBaseURI(string)",
+    "function withdrawUSDT()"
+  ];
+  const USDT_ABI = [
+    "function approve(address spender, uint256 amount) returns (bool)",
+    "function allowance(address owner, address spender) view returns (uint256)",
+    "function balanceOf(address) view returns (uint256)"
+  ];
+
+  let provider, signer, contract, usdt, account;
+
+  const $ = (id) => document.getElementById(id);
+  const rpc = new ethers.JsonRpcProvider("https://bsc-dataseed.bnbchain.org");
+  // Some in-app wallets (Binance Wallet) return tx objects ethers can't parse; wait on our own RPC by hash.
+  async function sendAndWait(fn) {
+    let hash;
+    try { const tx = await fn(); hash = tx.hash; }
+    catch (e) { hash = e && (e.hash || (e.transaction && e.transaction.hash) || (e.receipt && e.receipt.hash)); if (!hash) throw e; }
+    setStatus("Transaction sent: " + hash + " — waiting for confirmation…");
+    const r = await rpc.waitForTransaction(hash, 1, 180000);
+    if (!r || r.status !== 1) throw new Error("Transaction failed on chain: " + hash);
+    return r;
+  }
+  async function needUSDT(qty) { return ethers.parseUnits((qty * 0.25).toFixed(2), 18); }
+
+  const setStatus = (t) => { $("status").innerText = t; };
+
+  if (CONTRACT_ADDRESS === "0x0000000000000000000000000000000000000000") {
+    $("deployBanner").style.display = "block";
+  }
+
+  async function ensureBSC() {
+    const chainId = await window.ethereum.request({ method: "eth_chainId" });
+    if (chainId !== BSC_CHAIN_ID) {
+      try {
+        await window.ethereum.request({ method: "wallet_switchEthereumChain", params: [{ chainId: BSC_CHAIN_ID }] });
+      } catch (e) {
+        if (e.code === 4902) {
+          await window.ethereum.request({ method: "wallet_addEthereumChain", params: [{
+            chainId: BSC_CHAIN_ID, chainName: "BNB Smart Chain",
+            nativeCurrency: { name: "BNB", symbol: "BNB", decimals: 18 },
+            rpcUrls: ["https://bsc-dataseed.bnbchain.org"], blockExplorerUrls: ["https://bscscan.com"]
+          }]});
+        } else { throw e; }
+      }
+    }
+  }
+
+  $("connectBtn").onclick = async () => {
+    try {
+      if (!window.ethereum) { setStatus("No wallet found. Install MetaMask or Binance Wallet first."); return; }
+      if (CONTRACT_ADDRESS === "0x0000000000000000000000000000000000000000") {
+        setStatus("Deployment pending — connect will work once the contract address is set.");
+      }
+      await ensureBSC();
+      provider = new ethers.BrowserProvider(window.ethereum);
+      await provider.send("eth_requestAccounts", []);
+      signer = await provider.getSigner();
+      account = await signer.getAddress();
+      contract = new ethers.Contract(CONTRACT_ADDRESS, ABI, signer);
+      usdt = new ethers.Contract(USDT, USDT_ABI, signer);
+      $("walletInfo").innerText = "Connected: " + account;
+      $("freeBtn").disabled = false;
+      $("approveBtn").disabled = false;
+      $("paidBtn").disabled = false;
+      await loadStats();
+      const owner = await contract.owner();
+      if (owner.toLowerCase() === account.toLowerCase()) $("ownerPanel").style.display = "block";
+      setStatus("Connected.");
+    } catch (e) { setStatus("Error: " + (e.shortMessage || e.message)); }
+  };
+
+  async function loadStats() {
+    try {
+      const [f, p, open] = await Promise.all([contract.freeMinted(), contract.paidMinted(), contract.mintOpen()]);
+      $("stats").innerText = "Free minted: " + f + " / 2222  |  Paid minted: " + p + " / 2222  |  Mint " + (open ? "OPEN" : "CLOSED");
+    } catch (e) { $("stats").innerText = "Could not load stats (contract not deployed yet?)."; }
+  }
+
+  $("freeBtn").onclick = async () => {
+    try {
+      setStatus("Sending free mint… confirm in your wallet.");
+      await sendAndWait(() => contract.freeMint());
+      setStatus("Free mint confirmed!");
+      await loadStats();
+    } catch (e) { setStatus("Error: " + (e.shortMessage || e.message)); }
+  };
+
+  $("approveBtn").onclick = async () => {
+    try {
+      const qty = parseInt($("qty").value, 10);
+      const amount = await needUSDT(qty);
+      const bal = await new ethers.Contract(USDT, USDT_ABI, rpc).balanceOf(account);
+      if (bal < amount) { setStatus("Not enough USDT (BEP-20) in this wallet: you need " + (qty * 0.25) + " USDT on BNB Chain."); return; }
+      const cur = await new ethers.Contract(USDT, USDT_ABI, rpc).allowance(account, CONTRACT_ADDRESS);
+      if (cur >= amount) { setStatus("Already approved. Click Paid Mint."); return; }
+      setStatus("Sending USDT approval for " + (qty * 0.25) + " USDT… confirm in your wallet.");
+      await sendAndWait(() => usdt.approve(CONTRACT_ADDRESS, amount));
+      setStatus("USDT approved. Now click Paid Mint.");
+    } catch (e) { setStatus("Error: " + (e.shortMessage || e.message)); }
+  };
+
+  $("paidBtn").onclick = async () => {
+    try {
+      const qty = parseInt($("qty").value, 10);
+      const amount = await needUSDT(qty);
+      const r = new ethers.Contract(USDT, USDT_ABI, rpc);
+      const [bal, cur] = await Promise.all([r.balanceOf(account), r.allowance(account, CONTRACT_ADDRESS)]);
+      if (bal < amount) { setStatus("Not enough USDT (BEP-20) in this wallet: you need " + (qty * 0.25) + " USDT on BNB Chain."); return; }
+      if (cur < amount) { setStatus("Approve USDT first (step 1)."); return; }
+      setStatus("Sending paid mint (" + qty + ")… confirm in your wallet.");
+      await sendAndWait(() => contract.paidMint(qty, { gasLimit: 150000n + 120000n * BigInt(qty) }));
+      setStatus("Paid mint confirmed!");
+      await loadStats();
+    } catch (e) { setStatus("Error: " + (e.shortMessage || e.message)); }
+  };
+
+  $("openBtn").onclick = async () => { try { await sendAndWait(() => contract.setMintOpen(true)); setStatus("Mint opened."); await loadStats(); } catch (e) { setStatus("Error: " + (e.shortMessage || e.message)); } };
+  $("closeBtn").onclick = async () => { try { await sendAndWait(() => contract.setMintOpen(false)); setStatus("Mint closed."); await loadStats(); } catch (e) { setStatus("Error: " + (e.shortMessage || e.message)); } };
+  $("baseUriBtn").onclick = async () => { try { const v = $("baseUriInput").value.trim(); if (!v) return; await sendAndWait(() => contract.setBaseURI(v)); setStatus("Base URI set."); } catch (e) { setStatus("Error: " + (e.shortMessage || e.message)); } };
+  $("withdrawBtn").onclick = async () => { try { await sendAndWait(() => contract.withdrawUSDT()); setStatus("USDT proceeds withdrawn to owner."); } catch (e) { setStatus("Error: " + (e.shortMessage || e.message)); } };
+</script>
+</body>
+</html>
